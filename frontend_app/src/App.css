@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles */
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f7fafc;
+}
+
+.MuiPaper-root {
+    transition: box-shadow 0.3s ease-in-out;
+}
+
+.MuiPaper-root:hover {
+    box-shadow: 0px 6px 20px rgba(0, 0, 0, 0.2);
+}
