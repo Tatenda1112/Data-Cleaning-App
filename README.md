@@ -42,9 +42,7 @@ Data Cleaning
 ### ⚙️ FastAPI Swagger API Endpoints
 ![backend](https://github.com/user-attachments/assets/1d7f9b49-ccad-4850-94dc-0ac0aa88f5b8)
 
-> Make sure these images exist in your project:
-> - `frontend_app/public/transformer_ui.png`
-> - `frontend_app/public/api_docs.png`
+
 
 ---
 
