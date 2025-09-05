@@ -250,6 +250,90 @@ class YearFilter(BaseEstimator, TransformerMixin):
             self.errors = year_issues if not year_issues.empty else pd.DataFrame()
         return X
 
+class ConstantValueDetector(BaseEstimator, TransformerMixin):
+    def __init__(self, threshold=0.95):
+        self.threshold = threshold
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None): return self
+
+    def transform(self, X):
+        issues = []
+        for col in X.columns:
+            top_freq = X[col].value_counts(normalize=True).max()
+            if top_freq >= self.threshold:
+                issues.append((col, top_freq))
+        self.errors = pd.DataFrame(issues, columns=["Column", "Dominance"])
+        return X
+
+class OutlierDetector(BaseEstimator, TransformerMixin):
+    def __init__(self, columns=None, method="iqr"):
+        self.columns = columns
+        self.method = method
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None): return self
+
+    def transform(self, X):
+        outlier_rows = pd.DataFrame()
+        for col in self.columns:
+            if self.method == "zscore":
+                z = (X[col] - X[col].mean()) / X[col].std()
+                mask = z.abs() > 3
+            else:
+                q1, q3 = X[col].quantile([0.25, 0.75])
+                iqr = q3 - q1
+                mask = (X[col] < (q1 - 1.5 * iqr)) | (X[col] > (q3 + 1.5 * iqr))
+            flagged = X.loc[mask, col]
+            if not flagged.empty:
+                temp = pd.DataFrame({
+                    "column": col,
+                    "row": flagged.index,
+                    "value": flagged.values,
+                    "issue": "Outlier"
+                })
+                outlier_rows = pd.concat([outlier_rows, temp])
+        self.errors = outlier_rows
+        return X
+
+class CrossFieldLogicChecker(BaseEstimator, TransformerMixin):
+    def __init__(self, rules=None):
+        self.rules = rules if rules else []
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None): return self
+
+    def transform(self, X):
+        errors = []
+        for rule in self.rules:
+            try:
+                mask = X.eval(f"~({rule})")
+                errors.append(X[mask].assign(rule_failed=rule))
+            except:
+                continue
+        self.errors = pd.concat(errors) if errors else pd.DataFrame()
+        return X
+class CategoryValidator(BaseEstimator, TransformerMixin):
+    def __init__(self, column_expected_values: dict | None = None):
+        # Allow default empty config so the step can be present without crashing
+        self.column_expected_values = column_expected_values or {}
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None): return self
+
+    def transform(self, X):
+        if not self.column_expected_values:
+            self.errors = pd.DataFrame()
+            return X
+        all_errors = []
+        for col, expected in self.column_expected_values.items():
+            if col in X.columns:
+                invalids = X[~X[col].isin(expected)]
+                if not invalids.empty:
+                    invalids = invalids.assign(issue_type="Invalid category", column=col)
+                    all_errors.append(invalids)
+        self.errors = pd.concat(all_errors) if all_errors else pd.DataFrame()
+        return X
 
 class RemoveUnwantedCharacters(BaseEstimator, TransformerMixin):
     def __init__(self, columns=None, characters_to_remove=None):
@@ -341,17 +425,42 @@ class IssueSaver(BaseEstimator, TransformerMixin):
         errors = {}
         if self.pipeline_steps:
             for name, transformer in self.pipeline_steps:
-                if (
-                    hasattr(transformer, "errors")
-                    and isinstance(transformer.errors, pd.DataFrame)
-                    and not transformer.errors.empty
-                ):
-                    errors[name] = transformer.errors
+                if hasattr(transformer, "errors") and isinstance(transformer.errors, pd.DataFrame):
+                    # write sheet even if empty to make output predictable
+                    errors[name] = transformer.errors.copy()
 
         with pd.ExcelWriter(self.filename) as writer:
+            summary_rows = []
             for name, df in errors.items():
                 sheet_name = name[:31]
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"Issues saved to {self.filename}")
+                df_to_write = df if not df.empty else pd.DataFrame({"info": ["No issues detected"]})
+                df_to_write.to_excel(writer, sheet_name=sheet_name, index=False)
+                summary_rows.append({
+                    "check": name,
+                    "issues": 0 if df.empty else len(df)
+                })
 
+            # Add a compact summary sheet at the front
+            summary_df = pd.DataFrame(summary_rows)
+            if not summary_df.empty:
+                summary_df.to_excel(writer, sheet_name="Summary", index=False)
+            else:
+                pd.DataFrame({"info": ["No checks executed"]}).to_excel(writer, sheet_name="Summary", index=False)
+
+        print(f"Issues saved to {self.filename}")
+
+        # Also emit a JSON summary for frontend dashboards
+        try:
+            import json
+            from datetime import datetime
+            summary_payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "columns": list(X.columns),
+                "checks": summary_rows
+            }
+            with open("data_issues.json", "w", encoding="utf-8") as f:
+                json.dump(summary_payload, f)
+        except Exception:
+            # Non-fatal if JSON write fails
+            pass
         return X
