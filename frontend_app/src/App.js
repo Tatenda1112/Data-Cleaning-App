@@ -34,6 +34,7 @@ import Register from './components/Register';
 import ProjectManager from './components/ProjectManager';
 import AdminDashboard from './components/AdminDashboard';
 import LandingPage from './components/LandingPage';
+import DataConfig from './components/DataConfig';
 
 const initialTransformers = [
     { transformer_name: 'mandatory_columns', config: { mandatory_columns: [] } },
@@ -304,6 +305,13 @@ function App() {
                                     Upload
                                 </Button>
                                 <Button 
+                                    variant={activeSection === 'configure' ? 'contained' : 'text'} 
+                                    onClick={() => setActiveSection('configure')} 
+                                    startIcon={<Settings />}
+                                >
+                                    Configure
+                                </Button>
+                                <Button 
                                     variant={activeSection === 'check' ? 'contained' : 'text'} 
                                     onClick={() => setActiveSection('check')} 
                                     startIcon={<Settings />}
@@ -352,8 +360,20 @@ function App() {
                             <AdminDashboard token={token} />
                         )}
 
+                        {activeSection === 'configure' && (
+                            <DataConfig 
+                                columns={columns}
+                                onConfigUpdate={(newConfig) => {
+                                    console.log('Configuration updated:', newConfig);
+                                }}
+                                onRunChecks={() => {
+                                    setActiveSection('check');
+                                }}
+                            />
+                        )}
+
                         {selectedProject && (
-                <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>
+                            <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>
                                 {activeSection === 'upload' && (
                         <Box textAlign="center">
                             <Typography variant="h5" sx={{ mb: 3, fontWeight: 'bold', color: 'primary.main' }}>
@@ -433,7 +453,7 @@ function App() {
                             {activeSection === 'check' && (
                         <Box>
                             <Typography variant="h5" sx={{ mb: 3, fontWeight: 'bold', color: 'primary.main' }}>
-                                Step 2: Run Data Checks
+                                Step 3: Run Data Checks
                             </Typography>
                             <Box textAlign="center">
                                 <Button
@@ -529,7 +549,7 @@ function App() {
                             {activeSection === 'download' && (
                         <Box textAlign="center">
                             <Typography variant="h5" sx={{ mb: 3, fontWeight: 'bold', color: 'primary.main' }}>
-                                Step 3: Download Reports
+                                Step 4: Download Reports
                             </Typography>
                             <Grid container spacing={2} justifyContent="center">
                                 <Grid item>

@@ -195,6 +195,68 @@ async def download_issues_summary():
         return FileResponse(path, media_type="application/json", filename="data_issues.json")
     raise HTTPException(status_code=404, detail="Issues summary not found.")
 
+# Configuration endpoints
+@app.get("/config/default")
+async def get_default_config():
+    """Get default configuration for data quality checks."""
+    from .pipeline import get_default_config
+    return get_default_config()
+
+@app.get("/config/available-checks")
+async def get_available_checks():
+    """Get list of available data quality checks."""
+    from .pipeline import get_available_checks
+    return get_available_checks()
+
+@app.post("/config/update")
+async def update_config(new_config: dict):
+    """Update the data quality configuration."""
+    global configs
+    configs.update(new_config)
+    return {"message": "Configuration updated successfully.", "config": configs}
+
+@app.post("/configure-checks")
+async def configure_checks(check_config: dict):
+    """Configure specific data quality checks."""
+    global configs
+    global data
+    
+    if data is None:
+        raise HTTPException(status_code=400, detail="No data uploaded. Please upload a file first.")
+    
+    # Update configuration
+    configs.update(check_config)
+    
+    # Validate configuration against current data
+    available_columns = data.columns.tolist()
+    validation_errors = []
+    
+    # Check if specified columns exist in the data
+    for check_type, columns in check_config.items():
+        if isinstance(columns, list):
+            for col in columns:
+                if col not in available_columns:
+                    validation_errors.append(f"Column '{col}' not found in data for {check_type}")
+        elif isinstance(columns, dict):
+            for key, value in columns.items():
+                if key == 'columns' and isinstance(value, list):
+                    for col in value:
+                        if col not in available_columns:
+                            validation_errors.append(f"Column '{col}' not found in data for {check_type}")
+    
+    if validation_errors:
+        return {
+            "message": "Configuration updated with warnings.",
+            "warnings": validation_errors,
+            "config": configs
+        }
+    
+    return {
+        "message": "Configuration updated successfully.",
+        "config": configs,
+        "available_columns": available_columns
+    }
+
 # Authentication endpoints
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):

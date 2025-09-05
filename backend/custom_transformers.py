@@ -1,16 +1,20 @@
 import pandas as pd
+import numpy as np
 import re
 from sklearn.base import BaseEstimator, TransformerMixin
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
 
 
 class ImportDataTransformer(BaseEstimator, TransformerMixin):
+    """Import data from CSV, Excel, or Parquet files."""
     def __init__(self, file_path=None):
         self.file_path = file_path
         self.file_readers = {
             ".csv": pd.read_csv,
             ".xlsx": pd.read_excel,
             ".parquet": pd.read_parquet,
-            
         }
 
     def fit(self, X=None, y=None):
@@ -25,16 +29,48 @@ class ImportDataTransformer(BaseEstimator, TransformerMixin):
         read_function = self.file_readers.get(f".{file_extension}")
 
         if not read_function:
-            raise ValueError(
-                "Unsupported file format! Please use CSV, XLSX, or Parquet."
-            )
+            raise ValueError("Unsupported file format! Please use CSV, XLSX, or Parquet.")
 
         data = read_function(self.file_path)
         print(f"Data imported from {self.file_path}")
         return data
 
 
+class ColumnNameCleaner(BaseEstimator, TransformerMixin):
+    """Clean column names by removing special characters and standardizing format."""
+    def __init__(self):
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        original_columns = X.columns.tolist()
+        cleaned_columns = []
+        
+        for col in original_columns:
+            # Remove special characters, replace spaces with underscores, convert to lowercase
+            cleaned = re.sub(r'[^a-zA-Z0-9_]', '_', str(col))
+            cleaned = re.sub(r'_+', '_', cleaned)  # Replace multiple underscores with single
+            cleaned = cleaned.strip('_').lower()
+            cleaned_columns.append(cleaned)
+        
+        X.columns = cleaned_columns
+        
+        # Record changes
+        changes = []
+        for orig, new in zip(original_columns, cleaned_columns):
+            if orig != new:
+                changes.append({'Original': orig, 'Cleaned': new})
+        
+        if changes:
+            self.errors = pd.DataFrame(changes)
+        
+        return X
+
+
 class MandatoryColumnsChecker(BaseEstimator, TransformerMixin):
+    """Check for missing mandatory columns."""
     def __init__(self, mandatory_columns=None):
         self.mandatory_columns = mandatory_columns if mandatory_columns else []
         self.errors = pd.DataFrame()
@@ -43,29 +79,18 @@ class MandatoryColumnsChecker(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        missing_columns = [
-            col for col in self.mandatory_columns if col not in X.columns
-        ]
-        self.errors = (
-            pd.DataFrame({"Missing Columns": missing_columns})
-            if missing_columns
-            else pd.DataFrame()
-        )
-        return X
-
-
-class ColumnNameCleaner(BaseEstimator, TransformerMixin):
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        X = X.copy()
-        X.columns = X.columns.str.strip().str.lower().str.replace(" ", "_", regex=True)
+        missing_columns = [col for col in self.mandatory_columns if col not in X.columns]
+        if missing_columns:
+            self.errors = pd.DataFrame({
+                'Missing_Columns': missing_columns,
+                'Check': 'MandatoryColumnsChecker'
+            })
         return X
 
 
 class WhitespaceCaseCleaner(BaseEstimator, TransformerMixin):
-    def __init__(self, columns=None, case="lower"):
+    """Clean whitespace and standardize case in text columns."""
+    def __init__(self, columns=None, case='upper'):
         self.columns = columns if columns else []
         self.case = case
         self.errors = pd.DataFrame()
@@ -74,27 +99,166 @@ class WhitespaceCaseCleaner(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        X = X.copy()
+        issues = []
         for col in self.columns:
             if col in X.columns:
-                X[col] = X[col].astype(str).str.strip()
-                X[col] = (
-                    X[col].str.lower() if self.case == "lower" else X[col].str.upper()
-                )
+                original_values = X[col].astype(str)
+                # Strip whitespace
+                cleaned_values = original_values.str.strip()
+                # Apply case conversion
+                if self.case == 'upper':
+                    cleaned_values = cleaned_values.str.upper()
+                elif self.case == 'lower':
+                    cleaned_values = cleaned_values.str.lower()
+                elif self.case == 'title':
+                    cleaned_values = cleaned_values.str.title()
+                
+                # Count changes
+                changes = (original_values != cleaned_values).sum()
+                if changes > 0:
+                    issues.append({
+                        'Column': col,
+                        'Changes_Made': changes,
+                        'Check': 'WhitespaceCaseCleaner'
+                    })
+                
+                X[col] = cleaned_values
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
         return X
 
 
-class MissingValuesDetector(BaseEstimator, TransformerMixin):
+class RemoveUnwantedCharacters(BaseEstimator, TransformerMixin):
+    """Remove unwanted characters from specified columns."""
+    def __init__(self, columns=None, unwanted_chars=None):
+        self.columns = columns if columns else []
+        self.unwanted_chars = unwanted_chars if unwanted_chars else ['\n', '\r', '\t']
+        self.errors = pd.DataFrame()
+
     def fit(self, X, y=None):
         return self
 
     def transform(self, X):
-        missing_values = X[X.isnull().any(axis=1)]
-        self.errors = missing_values if not missing_values.empty else pd.DataFrame()
+        issues = []
+        for col in self.columns:
+            if col in X.columns:
+                original_values = X[col].astype(str)
+                cleaned_values = original_values
+                
+                for char in self.unwanted_chars:
+                    cleaned_values = cleaned_values.str.replace(char, '', regex=False)
+                
+                # Count changes
+                changes = (original_values != cleaned_values).sum()
+                if changes > 0:
+                    issues.append({
+                        'Column': col,
+                        'Characters_Removed': changes,
+                        'Check': 'RemoveUnwantedCharacters'
+                    })
+                
+                X[col] = cleaned_values
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
+        return X
+
+
+class NumericConverter(BaseEstimator, TransformerMixin):
+    """Convert specified columns to numeric, logging conversion failures."""
+    def __init__(self, columns=None):
+        self.columns = columns if columns else []
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        issues = []
+        for col in self.columns:
+            if col in X.columns:
+                original_values = X[col].copy()
+                # Convert to numeric, coercing errors to NaN
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+                
+                # Count conversion failures
+                failures = X[col].isna().sum() - original_values.isna().sum()
+                if failures > 0:
+                    issues.append({
+                        'Column': col,
+                        'Conversion_Failures': failures,
+                        'Check': 'NumericConverter'
+                    })
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
+        return X
+
+
+class DateConverter(BaseEstimator, TransformerMixin):
+    """Convert specified columns to datetime, logging conversion errors."""
+    def __init__(self, columns=None, date_format=None):
+        self.columns = columns if columns else []
+        self.date_format = date_format
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        issues = []
+        for col in self.columns:
+            if col in X.columns:
+                original_values = X[col].copy()
+                
+                if self.date_format:
+                    X[col] = pd.to_datetime(X[col], format=self.date_format, errors='coerce')
+                else:
+                    X[col] = pd.to_datetime(X[col], errors='coerce')
+                
+                # Count conversion failures
+                failures = X[col].isna().sum() - original_values.isna().sum()
+                if failures > 0:
+                    issues.append({
+                        'Column': col,
+                        'Date_Conversion_Failures': failures,
+                        'Check': 'DateConverter'
+                    })
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
+        return X
+
+
+class MissingValuesDetector(BaseEstimator, TransformerMixin):
+    """Detect and flag rows with missing values."""
+    def __init__(self, columns=None):
+        self.columns = columns if columns else []
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        if not self.columns:
+            # Check all columns
+            missing_mask = X.isnull().any(axis=1)
+        else:
+            # Check only specified columns
+            missing_mask = X[self.columns].isnull().any(axis=1)
+        
+        if missing_mask.any():
+            missing_rows = X[missing_mask].copy()
+            missing_rows['Row_Index'] = missing_rows.index
+            missing_rows['Check'] = 'MissingValuesDetector'
+            self.errors = missing_rows
+        
         return X
 
 
 class IDValidator(BaseEstimator, TransformerMixin):
+    """Validate ID columns for missing or invalid values."""
     def __init__(self, id_column=None):
         self.id_column = id_column
         self.errors = pd.DataFrame()
@@ -103,35 +267,37 @@ class IDValidator(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        if self.id_column and self.id_column in X.columns:
-            invalid_ids = X[X[self.id_column].isnull()]
-            self.errors = invalid_ids if not invalid_ids.empty else pd.DataFrame()
-        return X
-
-
-class NumericConverter(BaseEstimator, TransformerMixin):
-    def __init__(self, columns=None):
-        self.columns = columns if columns else []
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        X = X.copy()
-        for col in self.columns:
-            if col in X.columns:
-                X[col] = pd.to_numeric(X[col], errors="coerce")
-        conversion_issues = (
-            X[X[self.columns].isnull().any(axis=1)] if self.columns else pd.DataFrame()
-        )
-        self.errors = (
-            conversion_issues if not conversion_issues.empty else pd.DataFrame()
-        )
+        if not self.id_column or self.id_column not in X.columns:
+            return X
+        
+        issues = []
+        id_series = X[self.id_column]
+        
+        # Check for missing IDs
+        missing_ids = id_series.isnull().sum()
+        if missing_ids > 0:
+            issues.append({
+                'Column': self.id_column,
+                'Missing_IDs': missing_ids,
+                'Check': 'IDValidator'
+            })
+        
+        # Check for empty string IDs
+        empty_ids = (id_series.astype(str).str.strip() == '').sum()
+        if empty_ids > 0:
+            issues.append({
+                'Column': self.id_column,
+                'Empty_IDs': empty_ids,
+                'Check': 'IDValidator'
+            })
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
         return X
 
 
 class NegativeZeroChecker(BaseEstimator, TransformerMixin):
+    """Check for negative or zero values in numeric columns."""
     def __init__(self, columns=None):
         self.columns = columns if columns else []
         self.errors = pd.DataFrame()
@@ -140,16 +306,29 @@ class NegativeZeroChecker(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        negative_zero_issues = (
-            X[X[self.columns].le(0).any(axis=1)] if self.columns else pd.DataFrame()
-        )
-        self.errors = (
-            negative_zero_issues if not negative_zero_issues.empty else pd.DataFrame()
-        )
+        issues = []
+        for col in self.columns:
+            if col in X.columns and pd.api.types.is_numeric_dtype(X[col]):
+                # Check for negative values
+                negative_count = (X[col] < 0).sum()
+                # Check for zero values
+                zero_count = (X[col] == 0).sum()
+                
+                if negative_count > 0 or zero_count > 0:
+                    issues.append({
+                        'Column': col,
+                        'Negative_Values': negative_count,
+                        'Zero_Values': zero_count,
+                        'Check': 'NegativeZeroChecker'
+                    })
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
         return X
 
 
 class DuplicatesFromtheData(BaseEstimator, TransformerMixin):
+    """Detect fully duplicated rows."""
     def __init__(self):
         self.errors = pd.DataFrame()
 
@@ -157,34 +336,18 @@ class DuplicatesFromtheData(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-      
-        duplicates = X[X.duplicated()]
-
-        if not duplicates.empty:
-            duplicates = duplicates.sort_index()
-
-        self.errors = duplicates
+        duplicated_mask = X.duplicated(keep=False)
+        if duplicated_mask.any():
+            duplicated_rows = X[duplicated_mask].copy()
+            duplicated_rows['Row_Index'] = duplicated_rows.index
+            duplicated_rows['Check'] = 'DuplicatesFromtheData'
+            self.errors = duplicated_rows
+        
         return X
-
 
 
 class DuplicateIdentifier(BaseEstimator, TransformerMixin):
-    def __init__(self, columns=None):
-        self.columns = columns
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        duplicates = (
-            X[X.duplicated(subset=self.columns)] if self.columns else X[X.duplicated()]
-        )
-        self.errors = duplicates if not duplicates.empty else pd.DataFrame()
-        return X
-
-
-class DateConverter(BaseEstimator, TransformerMixin):
+    """Detect duplicate rows based on key columns."""
     def __init__(self, columns=None):
         self.columns = columns if columns else []
         self.errors = pd.DataFrame()
@@ -193,45 +356,23 @@ class DateConverter(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        X = X.copy()
-        for col in self.columns:
-            if col in X.columns:
-                X[col] = pd.to_datetime(X[col], errors="coerce")
-        date_conversion_issues = (
-            X[X[self.columns].isnull().any(axis=1)] if self.columns else pd.DataFrame()
-        )
-        self.errors = (
-            date_conversion_issues
-            if not date_conversion_issues.empty
-            else pd.DataFrame()
-        )
-        return X
-
-
-class StartEndYearComparator(BaseEstimator, TransformerMixin):
-    def __init__(self, start_year_column=None, end_year_column=None):
-        self.start_year_column = start_year_column
-        self.end_year_column = end_year_column
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        if (
-            self.start_year_column
-            and self.end_year_column
-            and self.start_year_column in X.columns
-            and self.end_year_column in X.columns
-        ):
-            start_end_issues = X[X[self.start_year_column] > X[self.end_year_column]]
-            self.errors = (
-                start_end_issues if not start_end_issues.empty else pd.DataFrame()
-            )
+        if not self.columns:
+            return X
+        
+        # Check for duplicates in specified columns
+        duplicated_mask = X.duplicated(subset=self.columns, keep=False)
+        if duplicated_mask.any():
+            duplicated_rows = X[duplicated_mask].copy()
+            duplicated_rows['Row_Index'] = duplicated_rows.index
+            duplicated_rows['Check'] = 'DuplicateIdentifier'
+            duplicated_rows['Key_Columns'] = str(self.columns)
+            self.errors = duplicated_rows
+        
         return X
 
 
 class YearFilter(BaseEstimator, TransformerMixin):
+    """Filter rows based on year range in date columns."""
     def __init__(self, date_column=None, start_year=None, end_year=None):
         self.date_column = date_column
         self.start_year = start_year
@@ -242,134 +383,202 @@ class YearFilter(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        if self.date_column and self.date_column in X.columns:
-            X = X.copy()
-            X["year"] = pd.to_datetime(X[self.date_column], errors="coerce").dt.year
-            year_issues = X[(X["year"] < self.start_year) | (X["year"] > self.end_year)]
-            X.drop(columns=["year"], inplace=True)
-            self.errors = year_issues if not year_issues.empty else pd.DataFrame()
-        return X
-
-class ConstantValueDetector(BaseEstimator, TransformerMixin):
-    def __init__(self, threshold=0.95):
-        self.threshold = threshold
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None): return self
-
-    def transform(self, X):
-        issues = []
-        for col in X.columns:
-            top_freq = X[col].value_counts(normalize=True).max()
-            if top_freq >= self.threshold:
-                issues.append((col, top_freq))
-        self.errors = pd.DataFrame(issues, columns=["Column", "Dominance"])
-        return X
-
-class OutlierDetector(BaseEstimator, TransformerMixin):
-    def __init__(self, columns=None, method="iqr"):
-        self.columns = columns
-        self.method = method
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None): return self
-
-    def transform(self, X):
-        outlier_rows = pd.DataFrame()
-        for col in self.columns:
-            if self.method == "zscore":
-                z = (X[col] - X[col].mean()) / X[col].std()
-                mask = z.abs() > 3
-            else:
-                q1, q3 = X[col].quantile([0.25, 0.75])
-                iqr = q3 - q1
-                mask = (X[col] < (q1 - 1.5 * iqr)) | (X[col] > (q3 + 1.5 * iqr))
-            flagged = X.loc[mask, col]
-            if not flagged.empty:
-                temp = pd.DataFrame({
-                    "column": col,
-                    "row": flagged.index,
-                    "value": flagged.values,
-                    "issue": "Outlier"
-                })
-                outlier_rows = pd.concat([outlier_rows, temp])
-        self.errors = outlier_rows
-        return X
-
-class CrossFieldLogicChecker(BaseEstimator, TransformerMixin):
-    def __init__(self, rules=None):
-        self.rules = rules if rules else []
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None): return self
-
-    def transform(self, X):
-        errors = []
-        for rule in self.rules:
-            try:
-                mask = X.eval(f"~({rule})")
-                errors.append(X[mask].assign(rule_failed=rule))
-            except:
-                continue
-        self.errors = pd.concat(errors) if errors else pd.DataFrame()
-        return X
-class CategoryValidator(BaseEstimator, TransformerMixin):
-    def __init__(self, column_expected_values: dict | None = None):
-        # Allow default empty config so the step can be present without crashing
-        self.column_expected_values = column_expected_values or {}
-        self.errors = pd.DataFrame()
-
-    def fit(self, X, y=None): return self
-
-    def transform(self, X):
-        if not self.column_expected_values:
-            self.errors = pd.DataFrame()
+        if not self.date_column or self.date_column not in X.columns:
             return X
-        all_errors = []
-        for col, expected in self.column_expected_values.items():
-            if col in X.columns:
-                invalids = X[~X[col].isin(expected)]
-                if not invalids.empty:
-                    invalids = invalids.assign(issue_type="Invalid category", column=col)
-                    all_errors.append(invalids)
-        self.errors = pd.concat(all_errors) if all_errors else pd.DataFrame()
+        
+        if not pd.api.types.is_datetime64_any_dtype(X[self.date_column]):
+            return X
+        
+        issues = []
+        years = X[self.date_column].dt.year
+        
+        if self.start_year is not None:
+            before_start = (years < self.start_year).sum()
+            if before_start > 0:
+                issues.append({
+                    'Column': self.date_column,
+                    'Years_Before_Start': before_start,
+                    'Start_Year': self.start_year,
+                    'Check': 'YearFilter'
+                })
+        
+        if self.end_year is not None:
+            after_end = (years > self.end_year).sum()
+            if after_end > 0:
+                issues.append({
+                    'Column': self.date_column,
+                    'Years_After_End': after_end,
+                    'End_Year': self.end_year,
+                    'Check': 'YearFilter'
+                })
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
         return X
 
-class RemoveUnwantedCharacters(BaseEstimator, TransformerMixin):
-    def __init__(self, columns=None, characters_to_remove=None):
-        self.columns = columns
-        self.characters_to_remove = characters_to_remove
+
+class StartEndYearComparator(BaseEstimator, TransformerMixin):
+    """Compare start and end year columns for logical consistency."""
+    def __init__(self, start_year_column=None, end_year_column=None):
+        self.start_year_column = start_year_column
+        self.end_year_column = end_year_column
         self.errors = pd.DataFrame()
 
     def fit(self, X, y=None):
         return self
 
     def transform(self, X):
-        if not self.characters_to_remove:
-            raise ValueError("characters_to_remove must be specified.")
+        if not self.start_year_column or not self.end_year_column:
+            return X
+        
+        if (self.start_year_column not in X.columns or 
+            self.end_year_column not in X.columns):
+            return X
+        
+        # Check if start year is after end year
+        invalid_mask = X[self.start_year_column] > X[self.end_year_column]
+        if invalid_mask.any():
+            invalid_rows = X[invalid_mask].copy()
+            invalid_rows['Row_Index'] = invalid_rows.index
+            invalid_rows['Check'] = 'StartEndYearComparator'
+            self.errors = invalid_rows
+        
+        return X
 
-        X = X.copy()
-        pattern = f"[{re.escape(self.characters_to_remove)}]"
 
-        for col in (self.columns if self.columns else X.columns):
-            if col in X.columns:
-                mask = X[col].astype(str).str.contains(pattern, regex=True, na=False)
-                problematic_rows = X.loc[mask, col]
-                if not problematic_rows.empty:
-                    error_data = pd.DataFrame({
-                        "column": [col] * len(problematic_rows),
-                        "row": problematic_rows.index,
-                        "value": problematic_rows.values,
-                        "issue_type": ["Unwanted characters found"] * len(problematic_rows),
+class ConstantValueDetector(BaseEstimator, TransformerMixin):
+    """Detect columns dominated by a single value."""
+    def __init__(self, threshold=0.95):
+        self.threshold = threshold
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        issues = []
+        for col in X.columns:
+            if pd.api.types.is_numeric_dtype(X[col]):
+                value_counts = X[col].value_counts()
+                if len(value_counts) > 0:
+                    most_common_freq = value_counts.iloc[0] / len(X[col])
+                    if most_common_freq >= self.threshold:
+                        issues.append({
+                            'Column': col,
+                            'Most_Common_Value': value_counts.index[0],
+                            'Frequency': most_common_freq,
+                            'Check': 'ConstantValueDetector'
+                        })
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
+        return X
+
+
+class OutlierDetector(BaseEstimator, TransformerMixin):
+    """Detect statistical outliers using IQR or Z-score method."""
+    def __init__(self, columns=None, method='iqr', threshold=1.5):
+        self.columns = columns if columns else []
+        self.method = method
+        self.threshold = threshold
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        issues = []
+        for col in self.columns:
+            if col in X.columns and pd.api.types.is_numeric_dtype(X[col]):
+                data = X[col].dropna()
+                if len(data) == 0:
+                    continue
+                
+                outliers = 0
+                if self.method == 'iqr':
+                    Q1 = data.quantile(0.25)
+                    Q3 = data.quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - self.threshold * IQR
+                    upper_bound = Q3 + self.threshold * IQR
+                    outliers = ((data < lower_bound) | (data > upper_bound)).sum()
+                
+                elif self.method == 'zscore':
+                    z_scores = np.abs((data - data.mean()) / data.std())
+                    outliers = (z_scores > self.threshold).sum()
+                
+                if outliers > 0:
+                    issues.append({
+                        'Column': col,
+                        'Outliers_Detected': outliers,
+                        'Method': self.method,
+                        'Check': 'OutlierDetector'
                     })
-                    self.errors = pd.concat([self.errors, error_data], ignore_index=True)
-                X[col] = X[col].astype(str).str.replace(pattern, "", regex=True)
+        
+        if issues:
+            self.errors = pd.DataFrame(issues)
+        return X
 
+
+class CrossFieldLogicChecker(BaseEstimator, TransformerMixin):
+    """Validate cross-column logic rules."""
+    def __init__(self, rules=None):
+        self.rules = rules if rules else []
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        issues = []
+        for rule in self.rules:
+            try:
+                # Evaluate rule as pandas expression
+                invalid_mask = ~X.eval(rule)
+                if invalid_mask.any():
+                    invalid_rows = X[invalid_mask].copy()
+                    invalid_rows['Row_Index'] = invalid_rows.index
+                    invalid_rows['Rule'] = rule
+                    invalid_rows['Check'] = 'CrossFieldLogicChecker'
+                    issues.append(invalid_rows)
+            except Exception as e:
+                print(f"Error evaluating rule '{rule}': {e}")
+        
+        if issues:
+            self.errors = pd.concat(issues, ignore_index=True)
+        return X
+
+
+class CategoryValidator(BaseEstimator, TransformerMixin):
+    """Validate categorical values against expected values."""
+    def __init__(self, column_expected_values=None):
+        self.column_expected_values = column_expected_values if column_expected_values else {}
+        self.errors = pd.DataFrame()
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        issues = []
+        for col, expected_values in self.column_expected_values.items():
+            if col in X.columns:
+                invalid_mask = ~X[col].isin(expected_values)
+                if invalid_mask.any():
+                    invalid_rows = X[invalid_mask].copy()
+                    invalid_rows['Row_Index'] = invalid_rows.index
+                    invalid_rows['Column'] = col
+                    invalid_rows['Expected_Values'] = str(expected_values)
+                    invalid_rows['Check'] = 'CategoryValidator'
+                    issues.append(invalid_rows)
+        
+        if issues:
+            self.errors = pd.concat(issues, ignore_index=True)
         return X
 
 
 class UniqueIDGenerator(BaseEstimator, TransformerMixin):
-    def __init__(self, id_column="unique_id", columns_to_concat=None):
+    """Generate unique ID column by concatenating specified columns."""
+    def __init__(self, id_column=None, columns_to_concat=None):
         self.id_column = id_column
         self.columns_to_concat = columns_to_concat if columns_to_concat else []
         self.errors = pd.DataFrame()
@@ -378,16 +587,26 @@ class UniqueIDGenerator(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        if self.columns_to_concat:
-            X[self.id_column] = (
-                X[self.columns_to_concat].astype(str).agg("-".join, axis=1)
-            )
-        else:
-            X[self.id_column] = pd.util.hash_pandas_object(X).astype(str)
+        if not self.id_column or not self.columns_to_concat:
+            return X
+        
+        # Create unique ID by concatenating specified columns
+        X[self.id_column] = X[self.columns_to_concat].astype(str).agg('_'.join, axis=1)
+        
+        # Check for duplicates in generated ID
+        duplicates = X[self.id_column].duplicated().sum()
+        if duplicates > 0:
+            self.errors = pd.DataFrame({
+                'Generated_ID_Column': self.id_column,
+                'Duplicate_IDs': duplicates,
+                'Check': 'UniqueIDGenerator'
+            })
+        
         return X
 
 
 class ColumnFilter(BaseEstimator, TransformerMixin):
+    """Keep only selected columns."""
     def __init__(self, columns_to_keep=None):
         self.columns_to_keep = columns_to_keep if columns_to_keep else []
         self.errors = pd.DataFrame()
@@ -396,71 +615,81 @@ class ColumnFilter(BaseEstimator, TransformerMixin):
         return self
 
     def transform(self, X):
-        return X[self.columns_to_keep].copy() if self.columns_to_keep else X.copy()
+        if not self.columns_to_keep:
+            return X
+        
+        # Keep only specified columns
+        available_columns = [col for col in self.columns_to_keep if col in X.columns]
+        X = X[available_columns]
+        
+        # Log removed columns
+        removed_columns = [col for col in self.columns_to_keep if col not in X.columns]
+        if removed_columns:
+            self.errors = pd.DataFrame({
+                'Removed_Columns': removed_columns,
+                'Check': 'ColumnFilter'
+            })
+        
+        return X
 
 
-class FinalSaver(BaseEstimator, TransformerMixin):
-    def __init__(self, cleaned_filename="cleaned_data.xlsx"):
-        self.cleaned_filename = cleaned_filename
+class IssueSaver(BaseEstimator, TransformerMixin):
+    """Compile all detected issues into Excel and JSON reports."""
+    def __init__(self, output_excel="data_issues.xlsx", output_json="data_issues.json"):
+        self.output_excel = output_excel
+        self.output_json = output_json
         self.errors = pd.DataFrame()
 
     def fit(self, X, y=None):
         return self
 
     def transform(self, X):
-        X.to_excel(self.cleaned_filename, index=False)
-        print(f"Cleaned data saved to {self.cleaned_filename}")
+        # This will be called after all other transformers
+        # The actual issue compilation will be done in the pipeline
         return X
 
+    def save_issues(self, all_errors, summary_data=None):
+        """Save all issues to Excel and JSON files."""
+        try:
+            # Create Excel file with multiple sheets
+            with pd.ExcelWriter(self.output_excel, engine='openpyxl') as writer:
+                # Summary sheet
+                if summary_data:
+                    summary_df = pd.DataFrame([summary_data])
+                    summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Individual check sheets
+                for check_name, errors_df in all_errors.items():
+                    if not errors_df.empty:
+                        errors_df.to_excel(writer, sheet_name=check_name, index=False)
+            
+            # Create JSON summary
+            json_data = {
+                'timestamp': datetime.now().isoformat(),
+                'total_issues': sum(len(df) for df in all_errors.values()),
+                'checks': {name: len(df) for name, df in all_errors.items()},
+                'summary': summary_data or {}
+            }
+            
+            import json
+            with open(self.output_json, 'w') as f:
+                json.dump(json_data, f, indent=2)
+            
+            print(f"Issues saved to {self.output_excel} and {self.output_json}")
+            
+        except Exception as e:
+            print(f"Error saving issues: {e}")
 
-class IssueSaver(BaseEstimator, TransformerMixin):
-    def __init__(self, filename="data_issues.xlsx"):
-        self.filename = filename
-        self.pipeline_steps = []
+
+class FinalSaver(BaseEstimator, TransformerMixin):
+    """Save cleaned data (for future phase)."""
+    def __init__(self, output_file="cleaned_data.csv"):
+        self.output_file = output_file
+        self.errors = pd.DataFrame()
 
     def fit(self, X, y=None):
         return self
 
     def transform(self, X):
-        errors = {}
-        if self.pipeline_steps:
-            for name, transformer in self.pipeline_steps:
-                if hasattr(transformer, "errors") and isinstance(transformer.errors, pd.DataFrame):
-                    # write sheet even if empty to make output predictable
-                    errors[name] = transformer.errors.copy()
-
-        with pd.ExcelWriter(self.filename) as writer:
-            summary_rows = []
-            for name, df in errors.items():
-                sheet_name = name[:31]
-                df_to_write = df if not df.empty else pd.DataFrame({"info": ["No issues detected"]})
-                df_to_write.to_excel(writer, sheet_name=sheet_name, index=False)
-                summary_rows.append({
-                    "check": name,
-                    "issues": 0 if df.empty else len(df)
-                })
-
-            # Add a compact summary sheet at the front
-            summary_df = pd.DataFrame(summary_rows)
-            if not summary_df.empty:
-                summary_df.to_excel(writer, sheet_name="Summary", index=False)
-            else:
-                pd.DataFrame({"info": ["No checks executed"]}).to_excel(writer, sheet_name="Summary", index=False)
-
-        print(f"Issues saved to {self.filename}")
-
-        # Also emit a JSON summary for frontend dashboards
-        try:
-            import json
-            from datetime import datetime
-            summary_payload = {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "columns": list(X.columns),
-                "checks": summary_rows
-            }
-            with open("data_issues.json", "w", encoding="utf-8") as f:
-                json.dump(summary_payload, f)
-        except Exception:
-            # Non-fatal if JSON write fails
-            pass
+        # This will be implemented in the cleaning phase
         return X
