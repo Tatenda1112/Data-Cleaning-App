@@ -33,6 +33,7 @@ import Login from './components/Login';
 import Register from './components/Register';
 import ProjectManager from './components/ProjectManager';
 import AdminDashboard from './components/AdminDashboard';
+import LandingPage from './components/LandingPage';
 
 const initialTransformers = [
     { transformer_name: 'mandatory_columns', config: { mandatory_columns: [] } },
@@ -55,6 +56,7 @@ function App() {
     const [user, setUser] = useState(null);
     const [showLogin, setShowLogin] = useState(false);
     const [showRegister, setShowRegister] = useState(false);
+    const [showLanding, setShowLanding] = useState(!localStorage.getItem('token'));
     
     // App state
     const [file, setFile] = useState(null);
@@ -78,6 +80,7 @@ function App() {
     const handleLogin = async (token) => {
         setToken(token);
         localStorage.setItem('token', token);
+        setShowLanding(false);
         try {
             const response = await axios.get('http://localhost:8000/me', {
                 headers: { Authorization: `Bearer ${token}` }
@@ -94,6 +97,7 @@ function App() {
         setUser(null);
         setSelectedProject(null);
         setActiveSection('projects');
+        setShowLanding(true);
         localStorage.removeItem('token');
         setAnchorEl(null);
     };
@@ -222,8 +226,16 @@ function App() {
         setSnackbarOpen(false);
     };
 
-    // Show login/register if not authenticated
+    // Show landing page, login/register if not authenticated
     if (!token) {
+        if (showLanding) {
+            return (
+                <ThemeProvider theme={theme}>
+                    <CssBaseline />
+                    <LandingPage onGetStarted={() => setShowLogin(true)} />
+                </ThemeProvider>
+            );
+        }
         if (showRegister) {
             return (
                 <ThemeProvider theme={theme}>
@@ -235,7 +247,7 @@ function App() {
         return (
             <ThemeProvider theme={theme}>
                 <CssBaseline />
-                <Login onLogin={handleLogin} onSwitchToRegister={() => setShowLogin(true)} />
+                <Login onLogin={handleLogin} onSwitchToRegister={() => setShowRegister(true)} />
             </ThemeProvider>
         );
     }
@@ -341,7 +353,7 @@ function App() {
                         )}
 
                         {selectedProject && (
-                            <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>
+                <Paper elevation={3} sx={{ p: 4, borderRadius: 2 }}>
                                 {activeSection === 'upload' && (
                         <Box textAlign="center">
                             <Typography variant="h5" sx={{ mb: 3, fontWeight: 'bold', color: 'primary.main' }}>
@@ -365,12 +377,12 @@ function App() {
                                 <Typography variant="h6" sx={{ mb: 2 }}>Drag & drop your file here</Typography>
                                 <Typography variant="body2" color="text.secondary">or</Typography>
                                 <Box mt={2}>
-                                    <input type="file" onChange={handleFileUpload} style={{ display: 'none' }} id="file-upload" />
-                                    <label htmlFor="file-upload">
-                                        <Button variant="contained" component="span" startIcon={<CloudUpload />} size="large">
+                            <input type="file" onChange={handleFileUpload} style={{ display: 'none' }} id="file-upload" />
+                            <label htmlFor="file-upload">
+                                <Button variant="contained" component="span" startIcon={<CloudUpload />} size="large">
                                             Choose File
-                                        </Button>
-                                    </label>
+                                </Button>
+                            </label>
                                 </Box>
                             </Box>
                             {file && (
@@ -416,7 +428,7 @@ function App() {
                                 </Box>
                             )}
                         </Box>
-                            )}
+                    )}
 
                             {activeSection === 'check' && (
                         <Box>
@@ -512,7 +524,7 @@ function App() {
                                 </Box>
                             )}
                         </Box>
-                            )}
+                    )}
 
                             {activeSection === 'download' && (
                         <Box textAlign="center">
@@ -521,11 +533,11 @@ function App() {
                             </Typography>
                             <Grid container spacing={2} justifyContent="center">
                                 <Grid item>
-                                    <Button
-                                        variant="contained"
-                                        onClick={() => downloadFile('issues')}
-                                        startIcon={<Download />}
-                                        size="large"
+                            <Button
+                                variant="contained"
+                                onClick={() => downloadFile('issues')}
+                                startIcon={<Download />}
+                                size="large"
                                         disabled={!issuesReady}
                                     >
                                         Download Issues (.xlsx)
@@ -540,20 +552,20 @@ function App() {
                                         disabled={!summaryReady}
                                     >
                                         Download Summary (.json)
-                                    </Button>
+                            </Button>
                                 </Grid>
                             </Grid>
-                                </Box>
-                            )}
-                            </Paper>
+                        </Box>
+                    )}
+                </Paper>
                         )}
 
-                        <Snackbar open={snackbarOpen} autoHideDuration={6000} onClose={handleSnackbarClose}>
-                            <Alert onClose={handleSnackbarClose} severity={message.includes('failed') ? 'error' : 'success'} sx={{ width: '100%' }}>
-                                {message}
-                            </Alert>
-                        </Snackbar>
-                    </Container>
+                <Snackbar open={snackbarOpen} autoHideDuration={6000} onClose={handleSnackbarClose}>
+                    <Alert onClose={handleSnackbarClose} severity={message.includes('failed') ? 'error' : 'success'} sx={{ width: '100%' }}>
+                        {message}
+                    </Alert>
+                </Snackbar>
+            </Container>
                 </Box>
             </Box>
         </ThemeProvider>
