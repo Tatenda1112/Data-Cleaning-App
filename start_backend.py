@@ -7,7 +7,7 @@ import sys
 import os
 
 def main():
-    print("🚀 Starting DatViz Backend...")
+    print("Starting DatViz Backend...")
     print("Installing dependencies...")
     
     # Install requirements
